@@ -1,0 +1,194 @@
+/*
+  Smart Power & Environment Monitor with Arduino
+  Displays Voltage, Current, Power, Temperature, and Humidity on a 1.8" TFT LCD.
+
+  Components:
+  - Arduino Uno
+  - Voltage Sensor (up to 25V)
+  - ACS712 Current Sensor (5A module)
+  - 1.8" ST7735 TFT LCD
+  - DHT11 Temperature and Humidity Sensor
+
+  Libraries Needed:
+  1. Adafruit GFX Library
+  2. Adafruit ST7735 Library
+  3. DHT sensor library by Adafruit: https://github.com/adafruit/DHT-sensor-library
+
+  To install, go to Sketch > Include Library > Manage Libraries... and search for them.
+*/
+
+// Include necessary libraries
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
+#include <SPI.h>
+#include <DHT.h>
+
+// --- Pin Definitions ---
+// TFT LCD Pins
+#define TFT_CS     10
+#define TFT_RST    8
+#define TFT_DC     9
+
+// Sensor Pins
+const int voltageSensorPin = A0;
+const int currentSensorPin = A1;
+const int dhtPin = 7; // DHT11 data pin connected to D7
+
+// --- Sensor & Library Objects ---
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+
+#define DHTTYPE DHT11 // Define the type of DHT sensor you are using
+DHT dht(dhtPin, DHTTYPE);
+
+// --- Calibration Variables ---
+const float VOLTAGE_CAL = 25.0 / 1023.0;
+const float SENSITIVITY = 0.185;
+// We will now calibrate the zero offsets automatically in setup()
+float acsOffset = 2.5;
+float voltageOffset = 0.0; // Will be calibrated at startup
+
+// Global variables to store sensor readings
+float voltage = 0.0;
+float current = 0.0;
+float power = 0.0;
+float humidity = 0.0;
+float temperature = 0.0; // in Celsius
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("Smart Power & Environment Monitor Initializing...");
+
+  // Initialize the TFT display
+  tft.initR(INITR_BLACKTAB);
+  tft.setRotation(1);
+  tft.fillScreen(ST7735_BLACK);
+
+  // Initialize the DHT sensor
+  dht.begin();
+
+  // --- Draw Static UI Elements ---
+  tft.setTextColor(ST7735_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(15, 10);
+  tft.println("Monitor Hub");
+  tft.drawLine(0, 30, tft.width(), 30, ST7735_CYAN);
+
+  // Labels for the values
+  tft.setTextSize(1);
+  tft.setTextColor(ST7735_YELLOW);
+  tft.setCursor(5, 40);
+  tft.println("Voltage:");
+  tft.setCursor(5, 60);
+  tft.println("Current:");
+  tft.setCursor(5, 80);
+  tft.println("Power:");
+  tft.setCursor(5, 100);
+  tft.println("Temp:");
+  tft.setCursor(5, 120);
+  tft.println("Humidity:");
+
+  // --- Auto-Calibration for Sensors ---
+  // IMPORTANT: Make sure no load/source is connected when the device starts up!
+  Serial.println("Calibrating sensors... Do not connect load or source.");
+  
+  // Calibrate Voltage Sensor Offset
+  long totalVoltageAdc = 0;
+  for (int i = 0; i < 500; i++) {
+    totalVoltageAdc += analogRead(voltageSensorPin);
+    delay(2);
+  }
+  float avgVoltageAdc = totalVoltageAdc / 500.0;
+  voltageOffset = avgVoltageAdc * VOLTAGE_CAL; // Calculate the offset in Volts
+  
+  // Calibrate Current Sensor Offset
+  long totalOffsetAdc = 0;
+  for (int i = 0; i < 500; i++) {
+    totalOffsetAdc += analogRead(currentSensorPin);
+    delay(2);
+  }
+  float avgOffsetAdc = totalOffsetAdc / 500.0;
+  acsOffset = (avgOffsetAdc / 1023.0) * 5.0; // Convert ADC value to voltage
+  
+  Serial.print("Calibration complete. Voltage offset: ");
+  Serial.println(voltageOffset);
+  Serial.print("Current offset: ");
+  Serial.println(acsOffset);
+}
+
+void loop() {
+  // --- 1. Read Power Sensors ---
+  int adcVoltage = analogRead(voltageSensorPin);
+  // Apply calibration factor first, then subtract the calibrated offset
+  voltage = (adcVoltage * VOLTAGE_CAL) - voltageOffset;
+
+  // Correct for any small noise when no voltage is connected
+  if (voltage < 0.1) {
+    voltage = 0.0;
+  }
+
+  float totalCurrentAdc = 0;
+  for (int i = 0; i < 100; i++) {
+    totalCurrentAdc += analogRead(currentSensorPin);
+    delay(1);
+  }
+  float avgCurrentAdc = totalCurrentAdc / 100.0;
+  float sensorVoltage = (avgCurrentAdc / 1023.0) * 5.0;
+  
+  // Use the calibrated offset for a more accurate reading
+  current = (sensorVoltage - acsOffset) / SENSITIVITY;
+  
+  if (current < 0.05) {
+    current = 0.0;
+  }
+  power = voltage * current;
+
+  // --- 2. Read Environment Sensors ---
+  humidity = dht.readHumidity();
+  temperature = dht.readTemperature(); // Reads in Celsius by default
+
+  // Check if any reads failed and exit early to try again.
+  if (isnan(humidity) || isnan(temperature)) {
+    Serial.println("Failed to read from DHT sensor!");
+    return;
+  }
+
+  // --- 3. Display all values on the TFT LCD ---
+  tft.setTextSize(1);
+  tft.setTextColor(ST7735_GREEN, ST7735_BLACK);
+
+  // Display Voltage
+  tft.setCursor(70, 40);
+  tft.print(voltage, 2);
+  tft.print(" V   ");
+
+  // Display Current
+  tft.setCursor(70, 60);
+  tft.print(current, 2);
+  tft.print(" A   ");
+
+  // Display Power
+  tft.setCursor(70, 80);
+  tft.print(power, 2);
+  tft.print(" W   ");
+
+  // Display Temperature
+  tft.setCursor(70, 100);
+  tft.print(temperature, 1);
+  tft.print(" C   ");
+
+  // Display Humidity
+  tft.setCursor(70, 120);
+  tft.print(humidity, 1);
+  tft.print(" %   ");
+
+  // --- 4. Print values to Serial Monitor for debugging ---
+  Serial.print("V: "); Serial.print(voltage);
+  Serial.print(" | A: "); Serial.print(current);
+  Serial.print(" | W: "); Serial.print(power);
+  Serial.print(" | Temp: "); Serial.print(temperature);
+  Serial.print("C | Hum: "); Serial.print(humidity);
+  Serial.println("%");
+
+  // Wait before the next full loop
+  delay(1500);
+}
